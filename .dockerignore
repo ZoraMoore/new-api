@@ -1,10 +1,57 @@
-.github
 .git
-*.md
+.github
+.agents
+.cursor
+.claude
+.idea
 .vscode
-.gitignore
-Makefile
+.zed
+.history
+
+# Docs and local collaboration config are not needed in the image build context.
+*.md
 docs
+electron
+plans
+
+# Local runtime data should not be sent to the Docker builder.
+data
+logs
+upload
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.exe
+one-api
+new-api
+new-api-debug*
+
+# Development, test, and debug artifacts.
+**/*_test.go
+**/testdata
+Dockerfile.dev
+docker-compose.dev.yml
 .eslintcache
 .gocache
-/web/node_modules
+.gomodcache
+.gocache-temp
+.gopath
+.cache
+.test
+__debug_bin*
+
+# Frontend dependencies and dist output are rebuilt inside Docker.
+**/node_modules
+web/default/dist
+web/classic/dist
+web/dist
+
+# Local env files may contain secrets.
+.env
+.env.*
+!.env.example
+!.env.deploy.example
+
+.gitignore
+Makefile
