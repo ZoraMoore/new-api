@@ -38,6 +38,14 @@ func stringDeltaFromPrefix(prev string, next string) string {
 	return next
 }
 
+func imageGenerationResultMarkdown(result string) string {
+	result = strings.TrimSpace(result)
+	if result == "" {
+		return ""
+	}
+	return "![image](data:image/png;base64," + result + ")"
+}
+
 func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	if resp == nil || resp.Body == nil {
 		return nil, types.NewOpenAIError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
@@ -389,6 +397,37 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 
 		case "response.output_item.added", "response.output_item.done":
 			if streamResp.Item == nil {
+				break
+			}
+			if streamResp.Item.Type == dto.ResponsesOutputTypeImageGenerationCall {
+				delta := imageGenerationResultMarkdown(streamResp.Item.Result)
+				if delta == "" {
+					break
+				}
+				if !sendStartIfNeeded() {
+					sr.Stop(streamErr)
+					return
+				}
+				outputText.WriteString(delta)
+				usageText.WriteString(delta)
+				chunk := &dto.ChatCompletionsStreamResponse{
+					Id:      responseId,
+					Object:  "chat.completion.chunk",
+					Created: createAt,
+					Model:   model,
+					Choices: []dto.ChatCompletionsStreamResponseChoice{
+						{
+							Index: 0,
+							Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+								Content: &delta,
+							},
+						},
+					},
+				}
+				if !sendChatChunk(chunk) {
+					sr.Stop(streamErr)
+					return
+				}
 				break
 			}
 			if streamResp.Item.Type != "function_call" {

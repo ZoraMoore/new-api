@@ -345,6 +345,7 @@ type ResponsesOutput struct {
 	Content   []ResponsesOutputContent `json:"content"`
 	Quality   string                   `json:"quality"`
 	Size      string                   `json:"size"`
+	Result    string                   `json:"result,omitempty"`
 	CallId    string                   `json:"call_id,omitempty"`
 	Name      string                   `json:"name,omitempty"`
 	Arguments json.RawMessage          `json:"arguments,omitempty"`

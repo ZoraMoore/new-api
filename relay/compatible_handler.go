@@ -72,10 +72,8 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	adaptor.Init(info)
 
 	passThroughGlobal := model_setting.GetGlobalSettings().PassThroughRequestEnabled
-	if info.RelayMode == relayconstant.RelayModeChatCompletions &&
-		!passThroughGlobal &&
-		!info.ChannelSetting.PassThroughBodyEnabled &&
-		service.ShouldChatCompletionsUseResponsesGlobal(info.ChannelId, info.ChannelType, info.OriginModelName) {
+	useResponsesCompat := shouldUseResponsesCompatibility(info, passThroughGlobal)
+	if useResponsesCompat {
 		applySystemPromptIfNeeded(c, info, request)
 		usage, newApiErr := chatCompletionsViaResponses(c, info, adaptor, request)
 		if newApiErr != nil {
@@ -214,4 +212,17 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
 	}
 	return nil
+}
+
+func shouldUseResponsesCompatibility(info *relaycommon.RelayInfo, passThroughGlobal bool) bool {
+	if info == nil || info.RelayMode != relayconstant.RelayModeChatCompletions {
+		return false
+	}
+	if passThroughGlobal || info.ChannelMeta == nil || info.ChannelSetting.PassThroughBodyEnabled {
+		return false
+	}
+	if info.ChannelType == constant.ChannelTypeCodex {
+		return true
+	}
+	return service.ShouldChatCompletionsUseResponsesGlobal(info.ChannelId, info.ChannelType, info.OriginModelName)
 }

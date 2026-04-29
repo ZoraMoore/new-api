@@ -123,6 +123,11 @@ func ExtractOutputTextFromResponses(resp *dto.OpenAIResponsesResponse) string {
 		return sb.String()
 	}
 	for _, out := range resp.Output {
+		if out.Type == dto.ResponsesOutputTypeImageGenerationCall && strings.TrimSpace(out.Result) != "" {
+			return "![image](data:image/png;base64," + strings.TrimSpace(out.Result) + ")"
+		}
+	}
+	for _, out := range resp.Output {
 		for _, c := range out.Content {
 			if c.Text != "" {
 				sb.WriteString(c.Text)

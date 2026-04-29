@@ -21,14 +21,55 @@ import react from '@vitejs/plugin-react';
 import { defineConfig, transformWithEsbuild } from 'vite';
 import pkg from '@douyinfe/vite-plugin-semi';
 import path from 'path';
+import fs from 'fs';
+import { pathToFileURL } from 'url';
 import { codeInspectorPlugin } from 'code-inspector-plugin';
 const { vitePluginSemi } = pkg;
+
+// Sass importer that resolves Webpack-style `~package` imports to node_modules.
+const tildeImporter = {
+  canonicalize(url) {
+    if (!url.startsWith('~')) return null;
+    const stripped = url.slice(1);
+    const candidates = [stripped, `${stripped}/index`].flatMap((p) => [
+      `${p}.scss`,
+      `${p}.sass`,
+      `${p}.css`,
+      `_${path.basename(p)}.scss`.replace(path.basename(p), '') + path.basename(p).replace(/^_?/, '_') + '.scss',
+      p,
+    ]);
+    for (const cand of [stripped, ...candidates]) {
+      const abs = path.resolve(process.cwd(), 'node_modules', cand);
+      if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+        return pathToFileURL(abs);
+      }
+    }
+    return null;
+  },
+  load(canonicalUrl) {
+    const filePath = canonicalUrl.pathname;
+    const decoded = decodeURIComponent(
+      process.platform === 'win32' && filePath.startsWith('/') ? filePath.slice(1) : filePath
+    );
+    return {
+      contents: fs.readFileSync(decoded, 'utf8'),
+      syntax: decoded.endsWith('.sass') ? 'indented' : 'scss',
+    };
+  },
+};
 
 // https://vitejs.dev/config/
 export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+    },
+  },
+  css: {
+    preprocessorOptions: {
+      scss: {
+        importers: [tildeImporter],
+      },
     },
   },
   plugins: [
