@@ -730,7 +730,7 @@ func convertCodexImageGenerationResponse(c *gin.Context, resp *http.Response) (a
 // the codex /responses output and pulls the base64 `result` strings out of
 // any image_generation_call entries.
 func extractCodexImageResults(body []byte) ([]string, *dto.Usage) {
-	images := make([]string, 0, 1)
+	images := make(map[string]string) // item_id -> base64
 	usage := &dto.Usage{}
 
 	tryParseObject := func(buf []byte) {
@@ -744,7 +744,7 @@ func extractCodexImageResults(body []byte) ([]string, *dto.Usage) {
 		}
 		for _, out := range resp.Output {
 			if out.Type == dto.ResponsesOutputTypeImageGenerationCall && strings.TrimSpace(out.Result) != "" {
-				images = append(images, out.Result)
+				images[out.ID] = out.Result
 			}
 		}
 		if resp.Usage != nil {
@@ -753,9 +753,6 @@ func extractCodexImageResults(body []byte) ([]string, *dto.Usage) {
 	}
 
 	tryParseObject(body)
-	if len(images) > 0 {
-		return images, usage
-	}
 
 	for _, line := range bytes.Split(body, []byte("\n")) {
 		line = bytes.TrimSpace(line)
@@ -777,10 +774,28 @@ func extractCodexImageResults(body []byte) ([]string, *dto.Usage) {
 			var item dto.ResponsesOutput
 			if err := common.Unmarshal(rawItem, &item); err == nil {
 				if item.Type == dto.ResponsesOutputTypeImageGenerationCall && strings.TrimSpace(item.Result) != "" {
-					images = append(images, item.Result)
+					images[item.ID] = item.Result
+				}
+			}
+		}
+		if rawType, ok := event["type"]; ok {
+			var eventType string
+			_ = common.Unmarshal(rawType, &eventType)
+			if eventType == "response.image_generation_call.partial_image" {
+				var partial struct {
+					ItemID string `json:"item_id"`
+					Image  string `json:"partial_image_b64"`
+				}
+				if err := common.Unmarshal(payload, &partial); err == nil && partial.ItemID != "" {
+					images[partial.ItemID] = partial.Image
 				}
 			}
 		}
 	}
-	return images, usage
+
+	var results []string
+	for _, b64 := range images {
+		results = append(results, b64)
+	}
+	return results, usage
 }
