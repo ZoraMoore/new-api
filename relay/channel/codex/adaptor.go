@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -707,6 +708,26 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	return openai.OaiResponsesHandler(c, info, resp)
 }
 
+func writeCodexImageGenerationResponse(c *gin.Context, images []string) *types.NewAPIError {
+	data := make([]map[string]any, 0, len(images))
+	for _, b64 := range images {
+		data = append(data, map[string]any{"b64_json": b64})
+	}
+	out := map[string]any{
+		"created": time.Now().Unix(),
+		"data":    data,
+	}
+	payload, err := common.Marshal(out)
+	if err != nil {
+		return types.NewError(fmt.Errorf("codex channel: marshal image response: %w", err), types.ErrorCodeBadResponse)
+	}
+
+	c.Writer.Header().Set("Content-Type", "application/json")
+	c.Writer.WriteHeader(http.StatusOK)
+	_, _ = c.Writer.Write(payload)
+	return nil
+}
+
 func (a *Adaptor) GetModelList() []string {
 	return ModelList
 }
@@ -902,9 +923,33 @@ func convertCodexImageGenerationResponse(c *gin.Context, resp *http.Response) (a
 	if resp == nil || resp.Body == nil {
 		return nil, types.NewError(errors.New("codex channel: empty upstream response"), types.ErrorCodeBadResponse)
 	}
-	bodyBytes, err := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if err != nil {
+	defer resp.Body.Close()
+
+	var bodyBytes []byte
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64<<10), 128<<20)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			bodyBytes = append(bodyBytes, '\n')
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("data:")) {
+			payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+			if len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]")) {
+				images, usage := extractCodexFinalImageResultsFromSSEPayload(payload)
+				if len(images) > 0 {
+					if err := writeCodexImageGenerationResponse(c, images); err != nil {
+						return nil, err
+					}
+					return usage, nil
+				}
+			}
+		}
+		bodyBytes = append(bodyBytes, line...)
+		bodyBytes = append(bodyBytes, '\n')
+	}
+	if err := scanner.Err(); err != nil {
 		return nil, types.NewError(fmt.Errorf("codex channel: read upstream body: %w", err), types.ErrorCodeBadResponse)
 	}
 
@@ -917,23 +962,54 @@ func convertCodexImageGenerationResponse(c *gin.Context, resp *http.Response) (a
 		return nil, types.NewError(fmt.Errorf("codex channel: no image_generation_call result in upstream response (preview=%s)", preview), types.ErrorCodeBadResponse)
 	}
 
-	data := make([]map[string]any, 0, len(images))
-	for _, b64 := range images {
-		data = append(data, map[string]any{"b64_json": b64})
+	if err := writeCodexImageGenerationResponse(c, images); err != nil {
+		return nil, err
 	}
-	out := map[string]any{
-		"created": time.Now().Unix(),
-		"data":    data,
-	}
-	payload, err := common.Marshal(out)
-	if err != nil {
-		return nil, types.NewError(fmt.Errorf("codex channel: marshal image response: %w", err), types.ErrorCodeBadResponse)
+	return usage, nil
+}
+
+func extractCodexFinalImageResultsFromSSEPayload(payload []byte) ([]string, *dto.Usage) {
+	images := make(map[string]string)
+	usage := &dto.Usage{}
+
+	collectFromResponse := func(resp *dto.OpenAIResponsesResponse) {
+		if resp == nil {
+			return
+		}
+		for _, out := range resp.Output {
+			if out.Type == dto.ResponsesOutputTypeImageGenerationCall && strings.TrimSpace(out.Result) != "" {
+				images[out.ID] = out.Result
+			}
+		}
+		if resp.Usage != nil {
+			usage = resp.Usage
+		}
 	}
 
-	c.Writer.Header().Set("Content-Type", "application/json")
-	c.Writer.WriteHeader(http.StatusOK)
-	_, _ = c.Writer.Write(payload)
-	return usage, nil
+	var event map[string]json.RawMessage
+	if err := common.Unmarshal(payload, &event); err != nil {
+		return nil, usage
+	}
+	if rawResp, ok := event["response"]; ok {
+		var response dto.OpenAIResponsesResponse
+		if err := common.Unmarshal(rawResp, &response); err == nil {
+			collectFromResponse(&response)
+		}
+	}
+	if rawItem, ok := event["item"]; ok {
+		var item dto.ResponsesOutput
+		if err := common.Unmarshal(rawItem, &item); err == nil {
+			if item.Type == dto.ResponsesOutputTypeImageGenerationCall && strings.TrimSpace(item.Result) != "" {
+				images[item.ID] = item.Result
+			}
+		}
+	}
+
+	var results []string
+	for _, b64 := range images {
+		results = append(results, b64)
+	}
+	return results, usage
 }
 
 // extractCodexImageResults parses both JSON-object and SSE-stream forms of

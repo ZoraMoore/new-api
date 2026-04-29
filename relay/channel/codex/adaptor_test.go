@@ -2,11 +2,17 @@ package codex
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -142,4 +148,48 @@ func TestApplyImageGenerationAliasToBodyHandlesInvalidJSON(t *testing.T) {
 	rewritten, err := applyImageGenerationAliasToBody(body)
 	require.NoError(t, err)
 	require.Equal(t, string(body), string(rewritten))
+}
+
+func TestConvertCodexImageGenerationResponseReturnsWhenImageResultArrives(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	reader, writer := io.Pipe()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       reader,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, apiErr := convertCodexImageGenerationResponse(c, resp)
+		if apiErr != nil {
+			done <- apiErr
+			return
+		}
+		done <- nil
+	}()
+
+	_, err := fmt.Fprint(writer, "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"img_1\",\"type\":\"image_generation_call\",\"result\":\"abc123\"}}\n\n")
+	require.NoError(t, err)
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(500 * time.Millisecond):
+		_ = writer.Close()
+		t.Fatal("expected image response to return before upstream SSE closes")
+	}
+
+	_ = writer.Close()
+
+	var response struct {
+		Data []struct {
+			B64JSON string `json:"b64_json"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	require.Len(t, response.Data, 1)
+	require.Equal(t, "abc123", response.Data[0].B64JSON)
 }

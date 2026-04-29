@@ -556,13 +556,29 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		}
 	})
 
+	finalizeUsage := func() *dto.Usage {
+		if usage.TotalTokens == 0 {
+			return service.ResponseText2Usage(c, usageText.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
+		}
+		return usage
+	}
+
+	clientInterrupted := func() bool {
+		if c != nil && c.Request != nil && c.Request.Context().Err() != nil {
+			return true
+		}
+		return info != nil && info.StreamStatus != nil && info.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone
+	}
+
+	if clientInterrupted() {
+		return finalizeUsage(), nil
+	}
+
 	if streamErr != nil {
 		return nil, streamErr
 	}
 
-	if usage.TotalTokens == 0 {
-		usage = service.ResponseText2Usage(c, usageText.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
-	}
+	usage = finalizeUsage()
 
 	if !sentStart {
 		if !sendChatChunk(helper.GenerateStartEmptyResponse(responseId, createAt, model, nil)) {
