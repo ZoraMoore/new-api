@@ -327,6 +327,12 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 					createAt = int64(streamResp.Response.CreatedAt)
 				}
 			}
+			// 图片生成/编辑通常要等最终 image_generation_call.result 才有内容。
+			// 先发 OpenAI ChatCompletions 空首包，避免 Cherry Studio 这类客户端在等待期间断开 fetch。
+			if !sendStartIfNeeded() {
+				sr.Stop(streamErr)
+				return
+			}
 
 		//case "response.reasoning_text.delta":
 		//if !sendReasoningDelta(streamResp.Delta) {

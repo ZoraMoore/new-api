@@ -2,10 +2,12 @@ package codex
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
@@ -93,13 +95,24 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 		}
 	}
 
+	// Build the user message content: text prompt first, then any input images.
+	// For /v1/images/edits the caller supplies one or more images via multipart
+	// or the request.Image field; we forward them as input_image parts so the
+	// upstream image_generation tool can use them for image-to-image editing.
+	content := []map[string]any{
+		{"type": "input_text", "text": prompt},
+	}
+	imageParts, err := collectCodexImageInputParts(c, request)
+	if err != nil {
+		return nil, fmt.Errorf("codex channel: collect input images: %w", err)
+	}
+	content = append(content, imageParts...)
+
 	inputArr := []map[string]any{
 		{
-			"type": "message",
-			"role": "user",
-			"content": []map[string]any{
-				{"type": "input_text", "text": prompt},
-			},
+			"type":    "message",
+			"role":    "user",
+			"content": content,
 		},
 	}
 	inputRaw, err := common.Marshal(inputArr)
@@ -140,6 +153,203 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 	info.IsStream = true
 
 	return responsesReq, nil
+}
+
+func collectCodexImageInputParts(c *gin.Context, request dto.ImageRequest) ([]map[string]any, error) {
+	parts, err := codexImageInputPartsFromRaw(request.Image)
+	if err != nil {
+		return nil, err
+	}
+
+	multipartParts, err := codexMultipartImageInputParts(c)
+	if err != nil {
+		return nil, err
+	}
+	parts = append(parts, multipartParts...)
+	return parts, nil
+}
+
+func codexImageInputPartsFromRaw(raw json.RawMessage) ([]map[string]any, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+
+	switch common.GetJsonType(raw) {
+	case "string":
+		var value string
+		if err := common.Unmarshal(raw, &value); err != nil {
+			return nil, err
+		}
+		if part, ok := codexImageInputPartFromReference(value, ""); ok {
+			return []map[string]any{part}, nil
+		}
+	case "array":
+		var items []json.RawMessage
+		if err := common.Unmarshal(raw, &items); err != nil {
+			return nil, err
+		}
+		parts := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			itemParts, err := codexImageInputPartsFromRaw(item)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, itemParts...)
+		}
+		return parts, nil
+	case "object":
+		var obj map[string]json.RawMessage
+		if err := common.Unmarshal(raw, &obj); err != nil {
+			return nil, err
+		}
+		return codexImageInputPartsFromObject(obj)
+	}
+
+	return nil, nil
+}
+
+func codexImageInputPartsFromObject(obj map[string]json.RawMessage) ([]map[string]any, error) {
+	detail := codexStringField(obj, "detail")
+	if fileID := codexStringField(obj, "file_id"); fileID != "" {
+		part := map[string]any{
+			"type":    "input_image",
+			"file_id": fileID,
+		}
+		if detail != "" {
+			part["detail"] = detail
+		}
+		return []map[string]any{part}, nil
+	}
+
+	for _, key := range []string{"image_url", "url"} {
+		raw, ok := obj[key]
+		if !ok {
+			continue
+		}
+		part, ok, err := codexImageInputPartFromURLRaw(raw, detail)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return []map[string]any{part}, nil
+		}
+	}
+
+	return nil, nil
+}
+
+func codexImageInputPartFromURLRaw(raw json.RawMessage, detail string) (map[string]any, bool, error) {
+	raw = bytes.TrimSpace(raw)
+	switch common.GetJsonType(raw) {
+	case "string":
+		var value string
+		if err := common.Unmarshal(raw, &value); err != nil {
+			return nil, false, err
+		}
+		part, ok := codexImageInputPartFromReference(value, detail)
+		return part, ok, nil
+	case "object":
+		var obj map[string]json.RawMessage
+		if err := common.Unmarshal(raw, &obj); err != nil {
+			return nil, false, err
+		}
+		if detail == "" {
+			detail = codexStringField(obj, "detail")
+		}
+		if value := codexStringField(obj, "url"); value != "" {
+			part, ok := codexImageInputPartFromReference(value, detail)
+			return part, ok, nil
+		}
+	}
+	return nil, false, nil
+}
+
+func codexStringField(obj map[string]json.RawMessage, key string) string {
+	raw, ok := obj[key]
+	if !ok {
+		return ""
+	}
+	var value string
+	if err := common.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func codexImageInputPartFromReference(value string, detail string) (map[string]any, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, false
+	}
+
+	part := map[string]any{"type": "input_image"}
+	if strings.HasPrefix(value, "file-") {
+		part["file_id"] = value
+	} else {
+		part["image_url"] = value
+	}
+	if detail = strings.TrimSpace(detail); detail != "" {
+		part["detail"] = detail
+	}
+	return part, true
+}
+
+func codexMultipartImageInputParts(c *gin.Context) ([]map[string]any, error) {
+	if c == nil || c.Request == nil || !strings.Contains(strings.ToLower(c.Request.Header.Get("Content-Type")), "multipart/form-data") {
+		return nil, nil
+	}
+	if c.Request.MultipartForm == nil {
+		if _, err := c.MultipartForm(); err != nil {
+			return nil, fmt.Errorf("parse image edit multipart form: %w", err)
+		}
+	}
+	if c.Request.MultipartForm == nil {
+		return nil, nil
+	}
+
+	parts := make([]map[string]any, 0)
+	for _, fieldName := range []string{"image", "image[]"} {
+		for _, fileHeader := range c.Request.MultipartForm.File[fieldName] {
+			dataURL, err := codexMultipartImageDataURL(fileHeader)
+			if err != nil {
+				return nil, err
+			}
+			if part, ok := codexImageInputPartFromReference(dataURL, ""); ok {
+				parts = append(parts, part)
+			}
+		}
+	}
+	return parts, nil
+}
+
+func codexMultipartImageDataURL(fileHeader *multipart.FileHeader) (string, error) {
+	if fileHeader == nil {
+		return "", errors.New("empty image file")
+	}
+	file, err := fileHeader.Open()
+	if err != nil {
+		return "", fmt.Errorf("open image file %q: %w", fileHeader.Filename, err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return "", fmt.Errorf("read image file %q: %w", fileHeader.Filename, err)
+	}
+	if len(data) == 0 {
+		return "", fmt.Errorf("image file %q is empty", fileHeader.Filename)
+	}
+
+	mimeType := strings.TrimSpace(fileHeader.Header.Get("Content-Type"))
+	if mimeType == "" || strings.EqualFold(mimeType, "application/octet-stream") {
+		mimeType = http.DetectContentType(data)
+	}
+	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+		return "", fmt.Errorf("image file %q has unsupported content type %q", fileHeader.Filename, mimeType)
+	}
+
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
