@@ -215,12 +215,19 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 }
 
 func shouldUseResponsesCompatibility(info *relaycommon.RelayInfo, passThroughGlobal bool) bool {
-	if info == nil || info.RelayMode != relayconstant.RelayModeChatCompletions {
+	if info == nil {
 		return false
 	}
 	if passThroughGlobal || info.ChannelMeta == nil || info.ChannelSetting.PassThroughBodyEnabled {
 		return false
 	}
+
+	isChatCompletions := info.RelayMode == relayconstant.RelayModeChatCompletions
+	isClaudeMessages := info.RelayFormat == types.RelayFormatClaude
+	if !isChatCompletions && !isClaudeMessages {
+		return false
+	}
+
 	if info.ChannelType == constant.ChannelTypeCodex {
 		return true
 	}
